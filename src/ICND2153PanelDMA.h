@@ -88,9 +88,15 @@ class ICND2153PanelDMA : public Adafruit_GFX {
   bool doubleUpload = true;      // write both of the chips' buffers (needed for reliable updates)
   int taskCore = 0;              // core for the upload task (see begin())
   int taskPriority = 1;
-  bool useDimRange = false;      // experimental: dim with the chips' low-current range below
-                                 // dimRangeRatio (tints colours slightly warm on the tested panel)
-  float dimRangeRatio = 0.35f;   // low range at full image ~= normal range at 35% (measured)
+  bool useDimRange = true;       // use the chips' low-current range at low brightness, with the
+                                 // image scaled up to match: removes low-level flicker (slight tint)
+  // The low range is used below this brightness (0-255). The LEDs' colour shifts slightly at
+  // low current, so it's best kept to the levels where the normal range would flicker
+  // (below 28 on the tested panel). Capped at the smallest dimRangeRatio x 255.
+  uint8_t dimRangeBelow = 28;
+  // Low range output / normal range output for each LED colour {R, G, B}, used to scale the
+  // image up so brightness matches across the switch. Measured on the tested panel.
+  float dimRangeRatio[3] = {0.248f, 0.235f, 0.227f};
   bool vsyncOnUpdate = false;    // VSYNC in every update's setup (on makes animations tear)
   bool gclkDuringUpload = true;  // keep the panel lit while uploading
 
@@ -182,13 +188,15 @@ class ICND2153PanelDMA : public Adafruit_GFX {
   }
 
   // 0-255. Scales the whole image evenly, like the HUB75 library. Takes effect on the next
-  // show(). With useDimRange, brightness up to dimRangeRatio instead runs the chips in their
-  // low-current range with the image scaled up to match.
+  // show(). With useDimRange, brightness below dimRangeBelow instead runs the chips in their
+  // low-current range with each colour scaled up to match (see dimRangeRatio).
   void setBrightness(uint8_t b) {
     _brightness = b;
     const float e = b / 255.0f;
-    const bool dim = useDimRange && b > 0 && e <= dimRangeRatio;
-    _scale = dim ? e / dimRangeRatio : e;
+    float lim = dimRangeRatio[0];
+    for (int c = 1; c < 3; c++) if (dimRangeRatio[c] < lim) lim = dimRangeRatio[c];
+    const bool dim = useDimRange && b > 0 && b < dimRangeBelow && lim > 0.0f && e <= lim;
+    for (int c = 0; c < 3; c++) _scale[c] = dim ? e / dimRangeRatio[c] : e;
     if (dim != _dimActive) {
       _dimActive = dim;
       applyRange();
@@ -274,7 +282,7 @@ class ICND2153PanelDMA : public Adafruit_GFX {
   portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
   uint16_t _gamma[256];
   uint8_t _brightness = 128;
-  float _scale = 128 / 255.0f;   // image scale actually applied (after the range choice)
+  float _scale[3] = {128 / 255.0f, 128 / 255.0f, 128 / 255.0f};  // per-colour image scale (after the range choice)
   bool _dimActive = false;
   uint16_t _reg2Normal[3] = {0x67FF, 0x67FF, 0x67FF};
   uint16_t grayFloor = 0;     // optional minimum level for lit LEDs (0 = off, like HUB75)
@@ -303,7 +311,9 @@ class ICND2153PanelDMA : public Adafruit_GFX {
 
   void applyRange() {
     for (int c = 0; c < 3; c++)
-      _regs[2][c] = _dimActive ? (uint16_t)(0x4100 | (_reg2Normal[c] & 0xFF)) : _reg2Normal[c];
+      // Low range: change only the range bits (11 -> 01, so 0x67FF -> 0x65FF). Clearing the
+      // other bits too (0x41FF) made unlit LEDs glow brown on the tested panel.
+      _regs[2][c] = _dimActive ? (uint16_t)((_reg2Normal[c] & ~0x0300) | 0x0100) : _reg2Normal[c];
     _regsDirty = true;
   }
 
@@ -328,14 +338,14 @@ class ICND2153PanelDMA : public Adafruit_GFX {
   // RGB565 -> three 14-bit channel levels. grayFloor (0 = off, the default) optionally
   // raises every lit channel to at least that level.
   void toGray(uint16_t c, uint16_t &r, uint16_t &g, uint16_t &b) const {
-    r = level(_gamma[(c >> 8) & 0xF8]);     // same expansion as the HUB75 library's color565to888()
-    g = level(_gamma[(c >> 3) & 0xFC]);
-    b = level(_gamma[(c << 3) & 0xF8]);
+    r = level(_gamma[(c >> 8) & 0xF8], _scale[0]);   // same expansion as the HUB75 library's color565to888()
+    g = level(_gamma[(c >> 3) & 0xFC], _scale[1]);
+    b = level(_gamma[(c << 3) & 0xF8], _scale[2]);
   }
 
-  uint16_t level(uint16_t full) const {
-    if (full == 0 || _scale <= 0.0f) return 0;
-    uint32_t v = (uint32_t)(full * _scale + 0.5f);
+  uint16_t level(uint16_t full, float scale) const {
+    if (full == 0 || scale <= 0.0f) return 0;
+    uint32_t v = (uint32_t)(full * scale + 0.5f);
     if (v == 0) v = 1;                      // a lit LED stays lit at any brightness
     if (v < grayFloor) v = grayFloor;
     return (uint16_t)(v > GRAY_MAX ? GRAY_MAX : v);

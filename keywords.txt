@@ -9,3 +9,4 @@ setRegister	KEYWORD2
 getRegister	KEYWORD2
 lastUploadUs	KEYWORD2
 ICND2153_DEFAULT_PINS	LITERAL1
+dimRangeActive	KEYWORD2

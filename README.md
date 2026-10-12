@@ -10,7 +10,7 @@ These panels have the familiar HUB75 connector, but they aren't ordinary shift-r
 - **Same colours as ESP32-HUB75-MatrixPanel-DMA.** The colour mapping matches that library's 6-bit CIE mapping exactly, so a project can mix both panel types.
 - **Familiar API.** `begin()`, `clearScreen()`, `flipDMABuffer()`, `setBrightness8()` and `color565()` work like they do in ESP32-HUB75-MatrixPanel-DMA, so existing sketches port with few changes.
 
-> **Status: 0.1.0, single panel.** Built and tested on one panel model (below) with a classic ESP32. Panel size, colour order and orientation are currently fixed to that panel; chaining and other layouts are planned. Reports from other ICND2153 panels are very welcome.
+> **Status: 0.2.0, single panel.** Built and tested on one panel model (below) with a classic ESP32. Panel size, colour order and orientation are currently fixed to that panel; chaining and other layouts are planned. Reports from other ICND2153 panels are very welcome.
 
 ## Tested hardware
 
@@ -103,6 +103,9 @@ void loop() {
 | `busMHz` | 20 | I2S word clock: 5, 10 or 20 MHz. The panel's GCLK runs at half this. |
 | `uploadParts` | 4 | The image is uploaded in this many slices through one reused buffer. 1 is fastest but needs about 100 KB of DMA memory. |
 | `doubleUpload` | true | Writes both of the chips' image buffers. Needed for reliable updates. |
+| `useDimRange` | true | Below `dimRangeBelow`, use the chips' low-current range with the image scaled up per colour. Removes flicker at low brightness, with a slight colour shift. |
+| `dimRangeBelow` | 28 | Brightness below which `useDimRange` switches to the low range (capped at the smallest ratio × 255). |
+| `dimRangeRatio[3]` | 0.248, 0.235, 0.227 | Low/normal output per LED colour {R, G, B}, used by `useDimRange`. Measured on the tested panel. |
 | `vsyncOnUpdate` | false | Sends VSYNC at the start of each update. On makes animations tear. |
 | `clkInvert`, `swapWords` | false, true | Low-level I2S options. Leave as is unless the image is garbled. |
 | `taskCore`, `taskPriority` | 0, 1 | Where the background upload task runs. |
@@ -145,7 +148,7 @@ The setup sequence is: pre-activate, enable outputs, VSYNC, then each register p
 |---|---|---|
 | 2 | `0x0008` | From board707's DMD_STM32 |
 | 4 | `0x1770` | Bits 8–12 = scan lines − 1 (`0x17` = 24) |
-| 6 | `0x67FF` | **Tested.** High byte bits 0–1: `11` normal current range, `01` low range (about 35% as bright), `00` off. The `0x40` bit must stay set (clearing it gives a full-on fault state). Low byte bits 2–7: LED current trim; `FF` gave 0.72 A at full white versus 0.53 A at `07`. High byte bits 2–5 showed no measurable effect. |
+| 6 | `0x67FF` | **Tested.** High byte bits 0–1: `11` normal current range, `01` low range (about 24% of the normal output, measured per colour: red 0.248, green 0.235, blue 0.227; change only these two bits, as `0x41` instead of `0x65` made unlit LEDs glow brown), `00` off. The `0x40` bit must stay set (clearing it gives a full-on fault state). Low byte bits 2–7: LED current trim; `FF` gave 0.72 A at full white versus 0.53 A at `07`. High byte bits 2–5 showed no measurable effect on brightness or flicker. This layout matches the STP1612PW05's configuration register, which these chips reportedly copy: bits 2–9 there are an 8-bit current gain, bits 11–12 a PWM counting mode and bit 10 the data sync mode. |
 | 8 | `0x40F7` | No measurable effect from the variations tried |
 | 10 | `0x0040` | No measurable effect from the variations tried |
 
@@ -156,7 +159,7 @@ The setup sequence is: pre-activate, enable outputs, VSYNC, then each register p
 - **Data is shifted MSB first,** one 16-bit word per output channel. The image is sent row by row; within a row, channel by channel, with one word per chip in the chain for each channel. The last bit of the last chip's word gets the 1-clock data latch.
 - **GCLK must not have gaps within a frame.** Jittery software-generated GCLK flickers visibly, which is why this driver uses DMA.
 - **Updates:** two upload passes, each ending with VSYNC, with no VSYNC at the start of an update. The very first upload after power-on does include the start VSYNC. Other combinations froze the image, showed frames out of order, or tore during animations.
-- **The lowest grayscale levels flicker slightly** on the tested panel. A minimum level for lit LEDs (`setGrayFloor`) hides that, but it also stops the darkest shades from lighting, so it's off by default.
+- **Low levels flicker.** A full 14-bit PWM cycle takes about 40 ms, so small values pulse at roughly 25 Hz. `useDimRange` handles low brightness: below `dimRangeBelow` (default 28) it switches the chips to their low-current range and scales each colour up by its own ratio, so the same light uses about 4× larger PWM values. The LEDs' colour shifts slightly at low current, so keep the switch at the level where flicker starts. A minimum level for lit LEDs (`setGrayFloor`) is another option, but it stops the darkest shades from lighting, so it's off by default.
 
 ### Tested-panel specifics (currently fixed in code)
 
@@ -170,6 +173,8 @@ The setup sequence is: pre-activate, enable outputs, VSYNC, then each register p
 - Single 96×48 panel with the layout above; chaining and other panel sizes are planned.
 - Classic ESP32 only (I2S parallel mode). ESP32-S3 support would need the LCD_CAM peripheral.
 - A brief splash stutter can appear while Wi-Fi starts up, mostly right after flashing. Wi-Fi's start-up work briefly delays the upload task on core 0.
+- At low brightness, dim pixels flicker slightly while an animation runs. Each update ends with VSYNC, which disturbs dim pixels. Updates without VSYNC don't flicker but tear, and sending fewer VSYNCs made it worse. Static images are unaffected.
+- Below `dimRangeBelow` the low-current range shifts colours slightly (`useDimRange = false` keeps true colours, but low levels flicker).
 
 ## Credits
 
